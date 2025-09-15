@@ -1,0 +1,663 @@
+Ótimo — vamos desenhar a solução técnica completa para esse projeto, considerando Java 21 e SQLite/H2 como você pediu. Vou apresentar a arquitetura, decisões (com justificativas), APIs detalhadas, modelo de dados, fluxo de sincronização, estratégias de concorrência/consistência, tolerância a falhas, observabilidade, segurança e um plano de implementação com trechos de pseudocódigo Java que você poderá portar direto para Micronaut/Spring Boot/Quarkus (recomendo Micronaut pela experiência rápida em microservices e pelo seu histórico com Java 21).
+
+> Observação: você pediu “modo thinking”. Não vou expor pensamento privado — mas entregarei um desenho técnico completo, com raciocínio explícito, trade-offs e justificativas.
+
+
+
+
+---
+
+1. Visão geral da arquitetura (alta-nível)
+
+Arquitetura proposta (event-driven + central authoritative for online reservations):
+
+flowchart LR
+  subgraph Store Edge (cada loja)
+    POS[POS / Frontend]
+    StoreService[Store Service (Java 21)]
+    LocalDB[(SQLite file)]
+    PendingEvents[(pending_events)]
+  end
+
+  subgraph Network
+    API[HTTP(S) / Events]
+  end
+
+  subgraph Central
+    CentralAPI[Central Inventory Service]
+    CentralDB[(H2 / SQLite)]
+    Orders[Order Service]
+    Metrics[Observability]
+  end
+
+  POS -->|consulta/compra local| StoreService
+  StoreService --> LocalDB
+  StoreService --> PendingEvents
+  PendingEvents -->|push / retry| API --> CentralAPI
+  CentralAPI --> CentralDB
+  Orders --> CentralAPI
+  CentralAPI -->|webhook/ack| StoreService
+  CentralAPI --> Metrics
+
+Resumo dos componentes:
+
+Store Service (edge): roda em cada loja; atende o POS local; atualiza DB local (SQLite) instantaneamente; gera eventos locais (append-only) e faz sync assíncrono ao Central.
+
+Central Inventory Service: agrega eventos, mantém visão global, responde à loja (acks/compensações) e serve consultas online (site).
+
+Canal de eventos: idealmente Kafka/RabbitMQ; para protótipo usamos HTTP POST idempotente + persistência local de eventos e retry.
+
+DBs: lojas → SQLite (arquivo local) ou H2 em file-mode; central → H2 (in-memory ou file) para protótipo. H2 facilita testes em Java.
+
+
+
+---
+
+2. Requisitos funcionais mapeados para componentes
+
+Consulta disponibilidade (baixa latência para clientes) → Central API (caching + agregação) e Store Service (para consultas locais instantâneas).
+
+Vendas em loja (offline poss.) → Store Service atualiza local e gera evento para central (sync posterior).
+
+Vendas online → Central faz reservation atômica (consistência forte para evitar oversell).
+
+Sincronização entre loja ↔ central → eventos idempotentes com eventId, storeId, localTxId.
+
+Resolução de conflitos → central é autoridade para contagem global; compensação acionada se necessário.
+
+Observability & Security → métricas, tracing, TLS, tokens.
+
+
+
+---
+
+3. Estratégia de consistência e concorrência (trade-offs)
+
+Possíveis estratégias:
+
+Strong consistency: todas as operações de estoque passam pelo central → evita oversell, porém aumenta latência para vendas na loja offline.
+
+Availability-first (eventual consistency): loja opera localmente e central apenas reconcilia → muito disponível, mas risco de oversell.
+
+
+Escolha proposta (híbrida / pragmática):
+
+Para vendas online: consistência forte — central processa reserva atômica (transactional).
+
+Para vendas em loja: disponibilidade local — aplica localmente e envia evento ao central. Central reconcilia; se conflito (ex.: global negative), central gera compensating action ou sinaliza para intervenção (refund, reserva manual).
+
+Justificativa: pontos de venda precisam operar mesmo com rede intermitente; vendas online (sem operador humano) exigem evitar oversell — prioriza consistência.
+
+
+Técnicas:
+
+Idempotency: cada evento possui eventId (UUID) para deduplicação.
+
+Optimistic locking no central (version column) ou SELECT FOR UPDATE para operações críticas (reservas).
+
+Compensation para corrigir divergências detectadas na reconciliação.
+
+
+
+---
+
+4. Modelo de dados (exemplos SQL / tabelas)
+
+CentralDB (H2) — tabelas principais:
+
+CREATE TABLE items (
+  sku VARCHAR PRIMARY KEY,
+  name VARCHAR,
+  total_quantity INT,        -- total agregado (somatório)
+  reserved_quantity INT DEFAULT 0,
+  version BIGINT DEFAULT 0,
+  last_updated TIMESTAMP
+);
+
+CREATE TABLE store_inventory (
+  store_id VARCHAR,
+  sku VARCHAR,
+  quantity INT,
+  version BIGINT DEFAULT 0,
+  last_updated TIMESTAMP,
+  PRIMARY KEY (store_id, sku)
+);
+
+CREATE TABLE events (
+  event_id VARCHAR PRIMARY KEY,
+  store_id VARCHAR,
+  sku VARCHAR,
+  delta INT,
+  local_tx_id VARCHAR,
+  prev_version BIGINT,
+  new_version BIGINT,
+  timestamp TIMESTAMP,
+  status VARCHAR -- PENDING, APPLIED, COMPENSATED
+);
+
+LocalDB (SQLite) — per store:
+
+CREATE TABLE inventory (
+  sku TEXT PRIMARY KEY,
+  quantity INTEGER,
+  version INTEGER DEFAULT 0,
+  last_updated DATETIME
+);
+
+CREATE TABLE pending_events (
+  event_id TEXT PRIMARY KEY,
+  sku TEXT,
+  delta INTEGER,
+  local_tx_id TEXT,
+  created_at DATETIME,
+  retry_count INTEGER DEFAULT 0,
+  status TEXT -- PENDING, SENT, FAILED
+);
+
+
+---
+
+5. Event Schema (JSON) — sincronização loja → central
+
+{
+  "eventId": "uuid-v4",
+  "storeId": "store-123",
+  "localTxId": "tx-456",        // id local da transação na loja
+  "sku": "PROD-001",
+  "delta": -2,                  // -2 = venda de 2 unidades, +n = chegada/reajuste
+  "timestamp": "2025-07-30T12:34:56Z",
+  "localVersion": 12,
+  "metadata": {
+    "operator": "caixa-1",
+    "origin": "POS"
+  }
+}
+
+Regras:
+
+Idempotência: central verifica eventId, ignora duplicatas.
+
+Ordenação: eventos não precisam chegar em ordem absoluta, desde que tenham localVersion/timestamps; central aplica em ordem de timestamp ou localVersion por store.
+
+Compensação: se applying would cause global negative, central marca event.status=REJECTED and returns a compensation instruction.
+
+
+
+---
+
+6. APIs (endpoints principais)
+
+A. Store Service (local)
+
+GET /stores/{storeId}/inventory — retorna inventário local.
+
+GET /stores/{storeId}/inventory/{sku}
+
+POST /stores/{storeId}/inventory/{sku}/adjust
+
+Body: { "delta": -2, "localTxId": "tx-123", "operator":"caixa-1" }
+
+Response: local new quantity + event scheduled for sync.
+
+
+POST /stores/{storeId}/events/send — endpoint interno que envia pendentes para central (chamado automaticamente pelo sync agent).
+
+GET /stores/{storeId}/sync/status — shows pending queue size.
+
+
+B. Central Inventory Service
+
+POST /central/events — ingest event from store (idempotent).
+
+Body: event JSON (see schema)
+
+Response: { "status": "APPLIED", "serverVersion": 456, "message": "" } or COMPENSATE
+
+
+GET /central/inventory/{sku} — returns global available = total - reserved
+
+POST /central/reserve
+
+Body: { "sku":"PROD-001", "quantity": 2, "orderId":"ord-999", "idempotencyKey":"..." }
+
+Behavioral: atomic check-and-decrement reserved_quantity or total; transactionally mark reserved.
+
+
+POST /central/commit — commit previously reserved (on payment success)
+
+POST /central/cancelReservation — release reserved
+
+
+Idempotency: endpoints supporting writes must accept Idempotency-Key header or explicit key field.
+
+
+---
+
+7. Fluxos principais (sequência)
+
+7.1 Venda local (loja online)
+
+1. POS chama POST /inventory/{sku}/adjust (delta -1).
+
+
+2. StoreService aplica transação no LocalDB (serializable), incrementa version, responde POS.
+
+
+3. StoreService grava evento em pending_events.
+
+
+4. SyncAgent envia evento ao POST /central/events.
+
+
+5. Central aplica evento: atualiza store_inventory e recalcula items.total_quantity.
+
+
+6. Central retorna ACK; StoreService marca evento como SENT or APPLIED.
+
+
+7. Em caso de conflito (central detecta oversell), central retorna COMPENSATE e possivelmente cria compensation_event enviado de volta à loja (ex.: estorno/alerta).
+
+
+
+7.2 Venda online (cliente website)
+
+1. Website chama POST /central/reserve.
+
+
+2. Central inicia transação SQL (SELECT ... FOR UPDATE / optimistic CAS), verifica available = total - reserved.
+
+
+3. Se houver estoque, incrementa reserved e retorna sucesso com reservationId.
+
+
+4. On payment success: POST /central/commit decrementa total e reserved; em failure: cancelReservation.
+
+
+
+
+---
+
+8. Concurrency control — detalhes técnicos
+
+Local (SQLite):
+
+Use transações serializáveis (BEGIN TRANSACTION), porém SQLite locks whole DB on writes — por isso manter operações rápidas.
+
+Use synchronized/semaphore no app para evitar concorrência multithread de escrita simultânea local.
+
+
+Central (H2 / Prototype):
+
+Prefer optimistic locking: version column; update WHERE sku = ? AND version = ?, se atualização retorna 0 então retry.
+
+Alternativa: SELECT ... FOR UPDATE + update (H2 suporta).
+
+Para reservations críticas use DB transactions com SERIALIZABLE isolation (H2 supports).
+
+
+Idempotency & dedup:
+
+Central mantém tabela events com eventId PK; inserção falhará em duplicatas → idempotência.
+
+
+
+
+---
+
+9. Fault tolerance e entrega confiável de eventos
+
+Store side:
+
+Persistir eventos em pending_events local.
+
+SyncAgent roda em background: pega eventos pendentes, envia ao central, marca como SENT on ACK.
+
+Retry policy: exponencial backoff + jitter; após N tentativas marcar como FAILED and alert operator.
+
+Forçar persistência antes de responder ao POS (durability).
+
+
+Central side:
+
+Recebe eventos idempotentemente; aplica transações em DB.
+
+Emitir ack com status detalhado.
+
+On central downtime: store accumulates pending events; when central back online, sync completes.
+
+
+Compensation:
+
+Central ao detectar divergência cria compensation_event que pode: ajustar contagem, criar alert, gerar ticket CRM.
+
+
+
+
+---
+
+10. Observabilidade e métricas
+
+Use OpenTelemetry + exporter (Jaeger) para traces.
+
+Use Micrometer + Prometheus endpoint /actuator/prometheus (Micronaut/Spring Boot integration).
+
+Logs estruturados (JSON) com correlationId/eventId.
+
+Health endpoints: /health, /metrics, /ready.
+
+Instrumentar: queue length (pending_events), retry_count, event apply rate, inventory discrepancies count.
+
+
+
+---
+
+11. Segurança
+
+Comunicação HTTPS/TLS entre lojas e central.
+
+Autenticação mútua ideal (mTLS) ou ao menos API keys por store.
+
+Assinar eventos (HMAC) ou usar JWT para garantir integridade.
+
+Rate limiting na central.
+
+Validação de entrada e saneamento de dados (schema validation).
+
+Audit logs (quem fez o ajuste, timestamp, txId).
+
+
+
+---
+
+12. Testes e validação
+
+Unit tests: JUnit 5, Mockito.
+
+Integration tests: usar H2 in-memory / SQLite in-memory; Testcontainers (opcional).
+
+Contract tests: Pact ou Postman collections.
+
+Concurrency tests: gerar N threads que tentam reserve/adjust e asserir invariantes (não oversell for online reservations).
+
+E2E: simular múltiplas lojas com Docker Compose.
+
+
+
+---
+
+13. Tech stack sugerido / libs
+
+Language: Java 21.
+
+Framework: Micronaut (ou Spring Boot se preferir).
+
+DB: H2 (central prototype) & SQLite (local store files) — ambas com JDBC.
+
+JSON: Jackson / Micronaut serialization.
+
+HTTP client: Micronaut HttpClient or WebClient (Spring WebClient).
+
+Scheduling: cron e scheduler do framework para SyncAgent.
+
+Resilience: Resilience4j (retries, circuit breaker) — ou usar built-in.
+
+Observability: Micrometer + OpenTelemetry.
+
+Build: Maven ou Gradle (recomendo Gradle com Java 21).
+
+Container: Docker (services + optional broker).
+
+Testing: JUnit 5, Testcontainers.
+
+Docs: OpenAPI / Swagger (Micronaut OpenAPI)
+
+
+
+---
+
+14. Estrutura de repositório (sugestão)
+
+inventory-project/
+├─ central-service/
+│  ├─ src/
+│  ├─ Dockerfile
+│  ├─ build.gradle
+│  └─ run.md
+├─ store-service-template/
+│  ├─ src/
+│  ├─ Dockerfile
+│  └─ run.md
+├─ docs/
+│  ├─ architecture.md
+│  ├─ run.md
+│  └─ prompts.md
+├─ docker-compose.yml
+└─ README.md
+
+
+---
+
+15. Exemplo de docker-compose.yml (protótipo)
+
+version: '3.8'
+services:
+  central:
+    build: ./central-service
+    ports: 
+      - "8080:8080"
+    environment:
+      - DB_URL=jdbc:h2:file:/data/central;MODE=PostgreSQL
+  store-1:
+    build: ./store-service-template
+    ports: 
+      - "8081:8080"
+    environment:
+      - CENTRAL_URL=http://central:8080
+      - STORE_ID=store-1
+  store-2:
+    build: ./store-service-template
+    ports: 
+      - "8082:8080"
+    environment:
+      - CENTRAL_URL=http://central:8080
+      - STORE_ID=store-2
+
+
+---
+
+16. Pseudocódigo Java (esqueleto) — principais responsabilidades
+
+StoreService.adjustStock(...)
+
+public class StoreInventoryService {
+  private final DataSource localDs;
+  private final EventRepository pendingRepo;
+
+  public AdjustResult adjustStock(String sku, int delta, String localTxId) {
+    // 1. start transaction on local DB
+    try (Connection c = localDs.getConnection()) {
+      c.setAutoCommit(false);
+      int current = selectQuantity(c, sku);
+      int newQty = current + delta;
+      if (newQty < 0) {
+        // business: allow negative? or reject
+        c.rollback();
+        return AdjustResult.failure("Insufficient local stock");
+      }
+      updateQuantity(c, sku, newQty);
+      long newVersion = incrementVersion(c, sku);
+      // persist event to pending_events
+      Event evt = Event.of(UUID.randomUUID(), storeId, localTxId, sku, delta, now(), newVersion);
+      insertPendingEvent(c, evt);
+      c.commit();
+      return AdjustResult.success(newQty, evt.getEventId());
+    } catch (SQLException e) {
+      // error handling
+      throw new RuntimeException(e);
+    }
+  }
+}
+
+SyncAgent (background)
+
+public void flushPending() {
+  List<Event> list = pendingRepo.fetchPendingBatch(100);
+  for (Event e : list) {
+    try {
+      HttpResponse resp = httpClient.post("/central/events", e);
+      if (resp.is2xx()) {
+         pendingRepo.markSent(e.getEventId());
+      } else if (resp.is4xx()) {
+         pendingRepo.markFailed(e.getEventId());
+      } else {
+         pendingRepo.incrementRetry(e.getEventId());
+      }
+    } catch (Exception ex) {
+      pendingRepo.incrementRetry(e.getEventId());
+    }
+  }
+}
+
+Central.applyEvent(...)
+
+@Transactional
+public ApplyResult applyEvent(Event evt) {
+  if (eventsRepository.exists(evt.getEventId())) {
+     return ApplyResult.duplicate();
+  }
+  // update store_inventory
+  StoreInv s = storeInventoryRepo.find(evt.storeId, evt.sku);
+  int newLocalQty = s.getQuantity() + evt.delta;
+  storeInventoryRepo.update(...);
+
+  // update global totals
+  Item item = itemsRepo.find(evt.sku);
+  item.setTotalQuantity(item.getTotalQuantity() + evt.delta);
+  // optimistic locking: update where version = item.version
+  boolean ok = itemsRepo.updateWithVersion(item);
+  if (!ok) {
+    // retry logic or resolve conflict
+  }
+  eventsRepository.insert(evt, APPLIED);
+  return ApplyResult.applied();
+}
+
+
+---
+
+17. Plano mínimo para protótipo (entregável)
+
+1. Bootstrap: projeto Micronaut Gradle para Central e Store template.
+
+
+2. DB models: criar esquema H2 e SQLite.
+
+
+3. Endpoints: implement basic REST endpoints (store adjust, central events, central reserve).
+
+
+4. SyncAgent: persistir pending_events e mecanismo de envio com retry.
+
+
+5. Idempotency: implementar dedupe por eventId.
+
+
+6. Tests: unit + integration para flows críticos.
+
+
+7. Docs: README + run.md + prompts.md (se usar IA).
+
+
+8. Docker compose: 1 central + 2 stores simulated.
+
+
+9. Observability: expor /metrics e basic logging.
+
+
+10. Demo script: script shell que faz: venda local em store1, envia evento, verifica central.
+
+
+
+
+---
+
+18. Checklists / pontos de atenção (prático)
+
+[ ] Definir política de conflito (quando central detecta negativo).
+
+[ ] Decidir se vendas locais podem criar estoque negativo (preferível: não; ou permitir, mas gerar alert).
+
+[ ] Escolher broker real (Kafka/RabbitMQ) se espera escala.
+
+[ ] Garantir persistência local antes de confirmar venda ao POS.
+
+[ ] Implementar testes de concorrência (reservas simultâneas).
+
+[ ] Rotina de reconciliação periódica (daily job) para detectar divergências e gerar relatórios.
+
+
+
+---
+
+19. Exemplo OpenAPI (esqueleto) — POST /central/events
+
+paths:
+  /central/events:
+    post:
+      summary: Ingest an event from a store (idempotent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Event'
+      responses:
+        '200':
+          description: Applied
+        '409':
+          description: Conflict/Compensation required
+components:
+  schemas:
+    Event:
+      type: object
+      properties:
+        eventId: { type: string }
+        storeId: { type: string }
+        localTxId: { type: string }
+        sku: { type: string }
+        delta: { type: integer }
+        timestamp: { type: string, format: date-time }
+        localVersion: { type: integer }
+
+
+---
+
+20. Justificativas resumidas das principais escolhas
+
+Java 21: linguagem atual, bom suporte a performance, compatível com frameworks modernos.
+
+Micronaut (sugestão): baixo overhead, rápido startup, integração com Micrometer/OpenTelemetry.
+
+SQLite em lojas: persistência local leve, fácil de empacotar como arquivo, simula ambiente offline.
+
+H2 na central (protótipo): fácil setup em JVM, suporte a memória/file mode para testes.
+
+Event-driven + central authoritative for online: minimiza oversell online, mantém disponibilidade nas lojas.
+
+Idempotency + persisted local queue: garante entrega confiável e tolerante à falhas de rede.
+
+
+
+---
+
+Se quiser eu já:
+
+gero um esqueleto de projeto (Micronaut + Java 21) com endpoints básicos, DB H2/SQLite, e SyncAgent (arquivos prontos + docker-compose) — ou
+
+monto OpenAPI completo com exemplos e Postman collection, ou
+
+gero um diagrama em PNG/SVG com base no mermaid acima.
+
+
+Qual desses prefere que eu gere agora? (Posso gerar o skeleton do serviço em Java com SQLite/H2 e docker-compose imediatamente.)
+
