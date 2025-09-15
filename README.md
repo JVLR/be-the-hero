@@ -61,6 +61,12 @@ This section has moved here: https://facebook.github.io/create-react-app/docs/ad
 
 ### Deployment
 
+https://track.pstmrk.it/3s/www.hackerrank.com%2Ftests%2F343comkp3g%2Flogin%3Fb%3DeyJ1c2VybmFtZSI6Imp2bGltYXJvY2hhQGdtYWlsLmNvbSIsInBhc3N3b3JkIjoiYmE4Y2MwMTUiLCJoaWRlIjp0cnVlLCJhY2NvbW1vZGF0aW9ucyI6eyJhZGRpdGlvbmFsX3RpbWVfcGVyY2VudCI6MH19/EDcI/sve-AQ/AQ/9fddc2d5-e5d1-4332-b9ec-e34444aad411/2/23xRhyhz-c
+
+https://track.pstmrk.it/3s/www.hackerrank.com%2Ftest%2Fsample/EDcI/sve-AQ/AQ/9fddc2d5-e5d1-4332-b9ec-e34444aad411/1/Izzn80Z1FY
+
+
+
 This section has moved here: https://facebook.github.io/create-react-app/docs/deployment
 
 ### `npm run build` fails to minify
