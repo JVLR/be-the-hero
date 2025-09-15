@@ -1,0 +1,72 @@
+# Prompt: Distributed Inventory Management System Optimization (Java 21 + SQLite/H2)
+
+You are an expert backend engineer and software architect. Your task is to design and implement a **prototype of a distributed inventory management system** using **Java 21**.  
+The system should improve **consistency, reduce latency, and enhance fault tolerance** compared to the existing monolithic solution.  
+
+---
+
+## Context
+- The company operates a chain of retail stores.  
+- Each store has a **local database** that periodically (every 15 minutes) syncs with a **central database**.  
+- Current issues: stock inconsistencies, update latency, lost sales, poor customer experience.  
+- The frontend is a **legacy web application**, while the backend is currently **monolithic**.  
+
+---
+
+## Objectives
+- Propose and prototype a **distributed architecture** for the backend.  
+- Use **Java 21** with either **SQLite** or **H2 Database** for local simulation.  
+- Provide **APIs for key inventory operations**.  
+- Prioritize **consistency vs availability** (justify choice).  
+- Ensure **fault tolerance** and handle **concurrent updates**.  
+- Focus on **observability, security, and maintainability**.  
+
+---
+
+## Technical Requirements
+1. **Architecture**  
+   - Distributed design (microservices or modularized services).  
+   - Central coordination with eventual consistency or strong consistency.  
+   - Store services replicate to central service in near real-time (not every 15 minutes).  
+
+2. **API Design**  
+   - REST endpoints for:  
+     - Add/update stock  
+     - Query available stock  
+     - Sync stock between store and central system  
+   - Proper request/response formats (JSON).  
+   - Error handling and logging included.  
+
+3. **Backend Implementation**  
+   - Use **Java 21** (Spring Boot, Micronaut, or pure Java HTTP server).  
+   - Persistence layer simulated with **SQLite or H2** (per store + central).  
+   - Support for concurrency (optimistic locking or versioning strategy).  
+   - Fault tolerance: retry logic, basic circuit breaker approach.  
+
+4. **Non-functional**  
+   - Error handling best practices.  
+   - Documentation + clear comments in code.  
+   - Tests for core functionality (unit + integration).  
+   - Observability: logging, metrics (simplified).  
+
+---
+
+## Deliverables
+- Source code in **Java 21** with build instructions (Maven or Gradle).  
+- **README.md** with architecture explanation, setup instructions, and design decisions.  
+- **run.md** explaining how to run the prototype.  
+- **prompts.md** including any AI prompts used.  
+- Prototype must demonstrate:  
+  - Distributed stock updates  
+  - Conflict resolution (concurrent updates)  
+  - Data synchronization  
+
+---
+
+## Task for the AI
+- Generate the **architecture diagram** (ASCII or Mermaid).  
+- Implement a **simplified prototype** in Java 21 with APIs.  
+- Justify **consistency vs availability** choice.  
+- Show how fault tolerance and observability are applied.  
+- Provide all necessary files for submission.  
+

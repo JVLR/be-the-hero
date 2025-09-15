@@ -1,0 +1,81 @@
+Você é um assistente técnico especializado em arquitetura de software e Java. Sua tarefa é auxiliar na criação de um projeto para a seguinte demanda:
+
+======================================
+📌 Projeto: Otimização de um Sistema de Gerenciamento de Inventário Distribuído
+======================================
+
+🎯 Objetivo:
+Projetar e prototipar uma melhoria em um sistema de gerenciamento de inventário existente em ambiente distribuído, visando:
+- Otimizar a consistência do inventário
+- Reduzir a latência de atualização de estoque
+- Diminuir custos operacionais
+- Garantir segurança e observabilidade
+
+--------------------------------------
+📖 Contexto Atual:
+- A empresa mantém um sistema de gerenciamento de inventário para uma rede de lojas de varejo.
+- Cada loja possui um banco de dados local que sincroniza com o central a cada 15 minutos.
+- Clientes visualizam o estoque online, mas há inconsistências e atrasos → má experiência e perda de vendas.
+- Backend atual: monolítico.
+- Frontend: aplicação web legada.
+
+--------------------------------------
+🛠️ Requisitos Técnicos:
+1. **Arquitetura distribuída**:
+   - Propor arquitetura que resolva problemas de consistência e latência.
+   - Justificar escolha (ex: microsserviços, event sourcing, CQRS, mensageria).
+
+2. **API Design**:
+   - Definir endpoints principais:
+     - Criar produto
+     - Consultar estoque
+     - Atualizar estoque (entrada/saída)
+     - Transferir entre lojas
+   - Garantir versionamento, boas práticas REST e JSON.
+
+3. **Backend em Java 21**:
+   - Framework sugerido: Micronaut, Spring Boot ou Quarkus.
+   - Banco de dados: **SQLite** ou **H2** em memória.
+   - Persistência simples (JPA/Hibernate ou repositório manual).
+   - Concorrência: tratamento seguro de updates simultâneos.
+   - Tolerância a falhas: retries, logs e tratamento de erros.
+
+4. **Não funcionais**:
+   - Documentação (README + run.md)
+   - Testes unitários e de integração
+   - Boas práticas de logs e observabilidade
+   - Justificativa de trade-offs (consistência vs disponibilidade)
+
+--------------------------------------
+⚙️ Estratégia Técnica:
+- Linguagem: **Java 21**
+- Banco: **SQLite/H2**
+- Arquitetura: Microsserviços (protótipo simplificado)
+- Comunicação: REST API
+- GenAI/Assistentes: Usados para acelerar brainstorming, geração de código boilerplate, documentação e testes.
+
+--------------------------------------
+📂 Entregáveis:
+- Código-fonte Java 21
+- README com instruções
+- run.md (como executar)
+- prompts.md (lista de prompts usados)
+- Arquitetura documentada em diagrama (opcional)
+
+--------------------------------------
+📌 Tarefas para o assistente (Cursor/IA):
+1. Gerar proposta arquitetural (microsserviços ou monólito modular distribuído).
+2. Criar design da API com endpoints e exemplos de payloads.
+3. Implementar protótipo em **Java 21** com **SQLite ou H2**.
+4. Adicionar concorrência segura para atualização de estoque.
+5. Incluir exemplos de testes unitários.
+6. Escrever README + run.md simulando execução local.
+7. Explicar decisões técnicas (justificativa arquitetural).
+8. Fornecer exemplos de observabilidade (logs estruturados, métricas).
+9. Ajudar a manter o código limpo e bem documentado.
+
+--------------------------------------
+✅ Instrução final:
+Atue como arquiteto e desenvolvedor sênior Java.  
+Forneça código bem estruturado, explicações detalhadas e documentação clara.  
+Capriche no design técnico e na clareza das justificativas.
